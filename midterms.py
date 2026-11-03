@@ -41,6 +41,7 @@ NAT_EX = ALL_STATES
 ODDS_EX = ["margin", "vote share", "seats", "popular vote"]
 MARGIN_EX = ["seats", "turnout", "generic ballot"]
 MAX_MARGIN = 100
+CALL = 0.98   # an odds row at or above this for one side is treated as called
 
 D_HOLDOVER = 34   # Dem Senate seats not up in 2026 (market counts seats won this cycle only)
 
@@ -381,6 +382,10 @@ def render_row(r, ticker, data):
         tot = d + rr + o
         if tot > 0: d, rr, o = d / tot, rr / tot, o / tot
         oth = f" {D_}other {o:>4.0%}{X}" if o > 0.02 else ""
+        called = B if d > CALL else R_ if rr > CALL else None
+        if called:
+            label = f"{called}{label}{X}"
+            note += f" {called}CALLED{X}"
         return f"  {label} {B}D {d:>4.0%}{X} {bar(d, rr)} {R_}R {rr:>4.0%}{X}{note}{oth}  {tag}"
 
     if r.get("signed"):
