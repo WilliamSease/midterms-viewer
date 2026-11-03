@@ -26,7 +26,7 @@ PIN = {
 }
 
 STATES = {"NC": "north carolina", "GA": "georgia", "TX": "texas", "OH": "ohio", "MI": "michigan",
-          "KS": "kansas", "NE": "nebraska", "IA": "iowa", "SC": "south carolina", "FL": "florida"}
+          "KS": "kansas", "NE": "nebraska", "IA": "iowa", "SC": "south carolina", "FL": "florida", "ME": "maine"}
 ALL_STATES = ["alabama","alaska","arizona","arkansas","california","colorado","connecticut","delaware",
  "florida","georgia","hawaii","idaho","illinois","indiana","iowa","kansas","kentucky","louisiana","maine",
  "maryland","massachusetts","michigan","minnesota","mississippi","missouri","montana","nebraska","nevada",
@@ -63,7 +63,7 @@ SECTIONS = [
         senate_margin("NC"), senate_margin("GA"),
         senate_odds("TX"), senate_odds("OH"), senate_odds("MI"), senate_odds("KS"),
         senate_odds("NE", ind="D"),
-        senate_odds("IA"), senate_odds("SC"), senate_odds("FL"),
+        senate_odds("IA"), senate_odds("SC"), senate_odds("FL"), senate_odds("ME"),
     ]),
     ("GOVERNOR", [gov_odds("TX"), gov_odds("OH"), gov_odds("FL")]),
 ]
