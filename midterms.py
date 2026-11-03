@@ -4,27 +4,25 @@ Midterms terminal viewer (Kalshi public API, no auth needed).
 
     watch -n 10 -c python3 midterms.py       # -c keeps colors
     python3 midterms.py --discover           # list candidate event tickers per row
+    python3 midterms.py --raw EVENT_TICKER   # dump an event's markets (for debugging parsers)
     python3 midterms.py --reset              # force ticker re-resolution (rarely needed)
 
 Prices are fetched live on every run. Only the label -> event-ticker mapping is
-cached (~/.cache/midterms_tickers.json), so each refresh doesn't have to page
-through every open Kalshi event. The cache auto-invalidates when a row's
-definition changes or after CACHE_TTL seconds. Pin exact tickers in PIN to skip
-resolution entirely.
+cached (~/.cache/midterms_tickers.json). Pin exact tickers in PIN to skip resolution.
 """
-import hashlib, json, os, sys, time, urllib.request, urllib.parse
+import hashlib, json, os, re, sys, time, urllib.request, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 BASE = "https://api.elections.kalshi.com/trade-api/v2"
 CACHE = os.path.expanduser("~/.cache/midterms_tickers.json")
-CACHE_TTL = 6 * 3600   # re-resolve tickers every 6 hours (prices are always live)
+CACHE_TTL = 6 * 3600
 
-# Pin exact event tickers to skip auto-resolution. Signed (margin) rows take a list.
+# Pin exact event tickers. Signed (margin) rows take a list.
 PIN = {
     "House Vote Margin": ["KXHOUSEPOPVOTEMARGIN-27NOV03"],
-    # "NC Senate Margin": ["KXMIDTERMMOV-NCSEND", "KXMIDTERMMOV-NCSENR"],
-    # "GA Senate Margin": ["KXMIDTERMMOV-GASEND", "KXMIDTERMMOV-GASENR"],
+    "NC Senate Margin":  ["KXMIDTERMMOV-NCSEN"],
+    "GA Senate Margin":  ["KXMIDTERMMOV-GASEN"],
 }
 
 STATES = {"NC": "north carolina", "GA": "georgia", "TX": "texas", "OH": "ohio", "MI": "michigan",
@@ -36,18 +34,15 @@ ALL_STATES = ["alabama","alaska","arizona","arkansas","california","colorado","c
  "oregon","pennsylvania","rhode island","south carolina","south dakota","tennessee","texas","utah",
  "vermont","virginia","washington","west virginia","wisconsin","wyoming"]
 
-# kw: list of any-of groups, all groups must match event title. ex: any of these disqualifies.
 def row(label, kind, kw, ex=(), **kw2):
     return dict(label=label, kind=kind, kw=kw, ex=list(ex), **kw2)
 
 NAT_EX = ALL_STATES
 ODDS_EX = ["margin", "vote share", "seats", "popular vote"]
 MARGIN_EX = ["seats", "turnout", "generic ballot"]
-MAX_MARGIN = 100   # sanity bound: margins are in points, ignore strikes beyond this
+MAX_MARGIN = 100
 
-# Senate seats NOT up in 2026 that Democrats (incl. caucusing independents) hold.
-# The "seats" market counts seats won in 2026 only, so we add this for a total.
-D_HOLDOVER = 34
+D_HOLDOVER = 34   # Dem Senate seats not up in 2026 (market counts seats won this cycle only)
 
 def senate_margin(st):
     return row(f"{st} Senate Margin", "margin", [["senate"], [STATES[st]], ["margin", "vote"]], MARGIN_EX, signed=True)
@@ -66,7 +61,7 @@ SECTIONS = [
     ("SENATE", [
         senate_margin("NC"), senate_margin("GA"),
         senate_odds("TX"), senate_odds("OH"), senate_odds("MI"), senate_odds("KS"),
-        senate_odds("NE", ind="D"),          # independent (Osborn) folded into D
+        senate_odds("NE", ind="D"),
         senate_odds("IA"), senate_odds("SC"),
     ]),
     ("GOVERNOR", [gov_odds("TX"), gov_odds("OH")]),
@@ -84,7 +79,7 @@ def get(path, **params):
         try:
             with urllib.request.urlopen(req, timeout=8) as r:
                 return json.load(r)
-        except Exception as e:
+        except Exception:
             if attempt == 2: raise
             time.sleep(0.5 * (attempt + 1))
 
@@ -99,9 +94,13 @@ def list_open_events():
         if not cursor: break
     return out
 
+def fetch_event(ticker):
+    d = get(f"/events/{ticker}", with_nested_markets="true")
+    ms = d.get("markets") or d.get("event", {}).get("markets") or []
+    return d.get("event", {}), ms
+
 # ---------- ticker cache (prices are never cached) ----------
 def sig(r):
-    """Fingerprint of a row's matching rules; cache entries die when it changes."""
     s = json.dumps([r["kw"], r["ex"], bool(r.get("signed"))], sort_keys=True)
     return hashlib.md5(s.encode()).hexdigest()[:10]
 
@@ -118,7 +117,6 @@ def matches(ev, r):
     return all(any(k in t for k in grp) for grp in r["kw"]) and not any(x in t for x in r["ex"])
 
 def resolve(rows, discover=False):
-    """Returns {label: ticker} for normal rows, {label: [tickers]} for signed rows."""
     cache, now = load_cache(), time.time()
 
     def fresh(r):
@@ -181,8 +179,8 @@ def parse_odds(markets):
         if p is None: continue
         if k in ps and ps[k] is None: ps[k] = p
         elif k == "O": other += p
-    if len(ms) == 1:  # single binary market
-        p = px(ms[0]);  k = party(ms[0])
+    if len(ms) == 1:
+        p = px(ms[0]); k = party(ms[0])
         if p is not None:
             ps = {"D": p, "R": 1 - p} if k != "R" else {"D": 1 - p, "R": p}
             other = 0
@@ -190,7 +188,6 @@ def parse_odds(markets):
 
 # ---------- parsing: seat ladders (unsigned) ----------
 def expected(markets):
-    """Expected value from a ladder of strike markets."""
     pts = []
     for m in live(markets):
         p, st = px(m), m.get("strike_type")
@@ -205,12 +202,12 @@ def expected(markets):
         for st, lo, hi, p in pts:
             if st in ("greater", "greater_or_equal") and lo is not None: bins.append((lo + w / 2, p))
             if st in ("less", "less_or_equal") and hi is not None: bins.append((hi - w / 2, p))
-    else:  # cumulative ladder
+    else:
         gt = sorted((lo, p) for st, lo, hi, p in pts if st in ("greater", "greater_or_equal") and lo is not None)
         lt = sorted((hi, p) for st, lo, hi, p in pts if st in ("less", "less_or_equal") and hi is not None)
         if gt:
             ts = [t for t, _ in gt]; S = [p for _, p in gt]
-            for i in range(1, len(S)): S[i] = min(S[i], S[i - 1])  # enforce monotone
+            for i in range(1, len(S)): S[i] = min(S[i], S[i - 1])
             step = (ts[-1] - ts[0]) / (len(ts) - 1) if len(ts) > 1 else 1
             bins = [(ts[0] - step / 2, 1 - S[0])]
             bins += [((ts[i] + ts[i + 1]) / 2, S[i] - S[i + 1]) for i in range(len(ts) - 1)]
@@ -229,33 +226,17 @@ def expected(markets):
     return sum(x * max(p, 0) for x, p in bins) / tot
 
 # ---------- parsing: signed (D/R) margin ladders ----------
-def ladder_stats(pairs):
-    """pairs: [(threshold, P(X > threshold))] -> (mean, P(X > 0))"""
-    merged = {}
-    for t, p in pairs: merged.setdefault(t, []).append(p)
-    pairs = sorted((t, sum(v) / len(v)) for t, v in merged.items())
-    if not pairs: return None, None
-    ts = [t for t, _ in pairs]; S = [p for _, p in pairs]
-    for i in range(1, len(S)): S[i] = min(S[i], S[i - 1])   # monotone survival function
-    step = (ts[-1] - ts[0]) / (len(ts) - 1) if len(ts) > 1 else 1
-    bins = [(ts[0] - step / 2, 1 - S[0])]
-    bins += [((ts[i] + ts[i + 1]) / 2, S[i] - S[i + 1]) for i in range(len(ts) - 1)]
-    bins.append((ts[-1] + step / 2, S[-1]))
-    tot = sum(max(p, 0) for _, p in bins)
-    if tot <= 0: return None, None
-    mean = sum(x * max(p, 0) for x, p in bins) / tot
-    # P(X > 0) by linear interpolation of the survival function
-    if ts[0] > 0:        p0 = 1.0
-    elif ts[0] == 0:     p0 = S[0]
-    elif ts[-1] < 0:     p0 = 0.0
-    elif ts[-1] == 0:    p0 = S[-1]
-    else:
-        p0 = 0.5
-        for i in range(len(ts) - 1):
-            if ts[i] <= 0 <= ts[i + 1]:
-                w = (0 - ts[i]) / ((ts[i + 1] - ts[i]) or 1)
-                p0 = S[i] + w * (S[i + 1] - S[i]); break
-    return mean, p0
+STRIKE_RE = re.compile(r"^([DR])?([PM])?(\d+(?:\.\d+)?)$", re.I)
+
+def ticker_strike(m):
+    """Parse trailing ticker segment like P18 / D8 / M2.5 / 8 -> (side or None, strike or None)."""
+    last = str(m.get("ticker", "")).split("-")[-1]
+    mm = STRIKE_RE.match(last)
+    if not mm: return None, None
+    side = {"D": 1, "R": -1}.get((mm.group(1) or "").upper())
+    x = float(mm.group(3))
+    if (mm.group(2) or "").upper() == "M": x = -x
+    return side, x
 
 def _side_from_text(t):
     t = t.lower()
@@ -265,23 +246,26 @@ def _side_from_text(t):
     return None
 
 def event_side(ev, ticker):
-    """+1 if event is 'D wins by > X', -1 if 'R wins by > X', None if unclear."""
     tk = ticker.upper()
     if tk.endswith("D"): return 1
     if tk.endswith("R"): return -1
     return _side_from_text(ev.get("title", "") + " " + ev.get("sub_title", ""))
 
 def market_side(m, ev_side):
-    """Per-market side: the market's own text wins, then the event's, then default D."""
+    """Market text > strike-segment letter > market-ticker party segment (…SEND-P18) > event > D."""
     t = " ".join(str(m.get(k, "")) for k in ("yes_sub_title", "subtitle", "title", "custom_strike"))
     s = _side_from_text(t)
     if s is not None: return s
+    ts, _ = ticker_strike(m)
+    if ts is not None: return ts
+    parts = str(m.get("ticker", "")).split("-")
+    if len(parts) >= 3 and STRIKE_RE.match(parts[-1]) and parts[-2][-1:].upper() in ("D", "R"):
+        return 1 if parts[-2][-1].upper() == "D" else -1
     return ev_side if ev_side is not None else 1
 
 def fetch_signed(tickers):
-    """Fetch every candidate event (plus flipped D/R siblings) and tag each market with its side."""
     tickers = list(dict.fromkeys(tickers))
-    for t in list(tickers):                        # add the opposite-party sibling for ...D / ...R tickers
+    for t in list(tickers):                        # flipped D/R sibling for ...D / ...R event tickers
         if t[-1] in "DR":
             sib = t[:-1] + ("R" if t[-1] == "D" else "D")
             if sib not in tickers: tickers.append(sib)
@@ -298,28 +282,68 @@ def fetch_signed(tickers):
             out.append(m)
     return ({}, out) if out else None
 
-def signed_ladder(markets):
-    pairs = []
-    for m in live(markets):
-        p, st = px(m), m.get("strike_type")
-        if p is None: continue
-        lo, hi = f(m.get("floor_strike")), f(m.get("cap_strike"))
-        s = m["_side"]
-        if st in ("greater", "greater_or_equal") and lo is not None:
-            x = lo
-            if abs(x) > MAX_MARGIN: continue
-            pairs.append((x, p) if s > 0 else (-x, 1 - p))      # P(D by > x) | P(R by > x) -> P(margin > -x)
-        elif st in ("less", "less_or_equal") and (hi if hi is not None else lo) is not None:
-            x = hi if hi is not None else lo
-            if abs(x) > MAX_MARGIN: continue
-            pairs.append((x, 1 - p) if s > 0 else (-x, p))      # P(D by < x) | P(R by < x) -> P(margin > -x)
-    return ladder_stats(pairs)
+def ladder_stats(pairs):
+    """pairs: [(threshold, P(X > threshold))] -> (mean, P(X > 0))"""
+    merged = {}
+    for t, p in pairs: merged.setdefault(round(t, 6), []).append(p)
+    pairs = sorted((t, sum(v) / len(v)) for t, v in merged.items())
+    if not pairs: return None, None
+    ts = [t for t, _ in pairs]; S = [p for _, p in pairs]
+    for i in range(1, len(S)): S[i] = min(S[i], S[i - 1])
+    step = (ts[-1] - ts[0]) / (len(ts) - 1) if len(ts) > 1 else 1
+    bins = [(ts[0] - step / 2, 1 - S[0])]
+    bins += [((ts[i] + ts[i + 1]) / 2, S[i] - S[i + 1]) for i in range(len(ts) - 1)]
+    bins.append((ts[-1] + step / 2, S[-1]))
+    tot = sum(max(p, 0) for _, p in bins)
+    if tot <= 0: return None, None
+    mean = sum(x * max(p, 0) for x, p in bins) / tot
+    if ts[0] > 0:        p0 = 1.0
+    elif ts[0] == 0:     p0 = S[0]
+    elif ts[-1] < 0:     p0 = 0.0
+    elif ts[-1] == 0:    p0 = S[-1]
+    else:
+        p0 = 0.5
+        for i in range(len(ts) - 1):
+            if ts[i] <= 0 <= ts[i + 1]:
+                w = (0 - ts[i]) / ((ts[i + 1] - ts[i]) or 1)
+                p0 = S[i] + w * (S[i + 1] - S[i]); break
+    return mean, p0
 
-# ---------- fetch ----------
-def fetch_event(ticker):
-    d = get(f"/events/{ticker}", with_nested_markets="true")
-    ms = d.get("markets") or d.get("event", {}).get("markets") or []
-    return d.get("event", {}), ms
+def bin_stats(bins):
+    """bins: [(lo, hi, prob)] of the signed margin -> (mean, P(X > 0))"""
+    tot = sum(max(p, 0) for _, _, p in bins)
+    if tot <= 0: return None, None
+    mean = sum((lo + hi) / 2 * max(p, 0) for lo, hi, p in bins) / tot
+    p0 = 0.0
+    for lo, hi, p in bins:
+        p = max(p, 0)
+        if lo >= 0: p0 += p
+        elif hi > 0: p0 += p * hi / ((hi - lo) or 1)
+    return mean, p0 / tot
+
+def signed_ladder(markets):
+    pairs, bins = [], []
+    for m in live(markets):
+        p = px(m)
+        if p is None: continue
+        st = m.get("strike_type")
+        lo, hi = f(m.get("floor_strike")), f(m.get("cap_strike"))
+        _, tx = ticker_strike(m)
+        s = m["_side"]
+        if st == "between" and lo is not None and hi is not None:
+            a, b = (lo, hi) if s > 0 else (-hi, -lo)
+            bins.append((a, b, p)); continue
+        if st in ("less", "less_or_equal"):
+            x = hi if hi is not None else lo if lo is not None else tx
+            if x is None or abs(x) > MAX_MARGIN: continue
+            pairs.append((x, 1 - p) if s > 0 else (-x, p))
+        else:  # greater / greater_or_equal / unknown type: strike from fields, else from the ticker
+            x = lo if lo is not None else tx
+            if x is None or abs(x) > MAX_MARGIN: continue
+            pairs.append((x, p) if s > 0 else (-x, 1 - p))
+    if len(pairs) >= 2: return ladder_stats(pairs)
+    if bins: return bin_stats(bins)
+    return ladder_stats(pairs)
 
 # ---------- render ----------
 def bar(d, r, width=28):
@@ -346,7 +370,7 @@ def render_row(r, ticker, data):
         d = d if d is not None else max(0, 1 - (rr or 0) - o)
         rr = rr if rr is not None else max(0, 1 - d - o)
         note = ""
-        if r.get("ind") == "D":                       # independent caucuses with D
+        if r.get("ind") == "D":
             d, o, note = d + o, 0, f" {D_}(incl. I){X}"
         tot = d + rr + o
         if tot > 0: d, rr, o = d / tot, rr / tot, o / tot
@@ -355,7 +379,8 @@ def render_row(r, ticker, data):
 
     if r.get("signed"):
         mean, p0 = signed_ladder(ms)
-        if mean is None: return f"  {label} {YEL}no prices{X}  {tag}"
+        if mean is None:
+            return f"  {label} {YEL}no prices{X} {D_}({len(ms)} mkts; run --raw <ticker>){X}  {tag}"
         c = B if mean >= 0 else R_
         s = f"{'D' if mean >= 0 else 'R'}+{abs(mean):.1f}"
         return f"  {label} {c}{s:<8}{X} {D_}D win {p0:.0%}{X}  {tag}"
@@ -378,8 +403,20 @@ def render_row(r, ticker, data):
         return f"  {label} {c}D {mean:>5.1f}{X} {D_}/ R {tot - mean:>5.1f}   need {maj}{extra}{X}  {tag}"
     return ""
 
+def dump_raw(ticker):
+    ev, ms = fetch_event(ticker)
+    print(f"event: {ev.get('event_ticker')}  title: {ev.get('title')!r}  markets: {len(ms)}")
+    for m in ms:
+        print(f"  {m.get('ticker'):<38} {str(m.get('strike_type')):<16} "
+              f"floor={m.get('floor_strike')} cap={m.get('cap_strike')} "
+              f"bid={m.get('yes_bid_dollars', m.get('yes_bid'))} ask={m.get('yes_ask_dollars', m.get('yes_ask'))} "
+              f"last={m.get('last_price_dollars', m.get('last_price'))} status={m.get('status')} "
+              f"sub={m.get('yes_sub_title')!r}")
+
 def main():
     rows = [r for _, rs in SECTIONS for r in rs]
+    if "--raw" in sys.argv:
+        dump_raw(sys.argv[sys.argv.index("--raw") + 1]); return
     if "--reset" in sys.argv:
         try: os.remove(CACHE)
         except FileNotFoundError: pass
