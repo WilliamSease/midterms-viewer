@@ -61,11 +61,11 @@ SECTIONS = [
     ]),
     ("SENATE", [
         senate_margin("NC"), senate_margin("GA"),
-        senate_odds("TX"), senate_odds("OH"), senate_odds("MI"), senate_odds("KS"),
-        senate_odds("NE", ind="D"),
-        senate_odds("IA"), senate_odds("SC"), senate_odds("FL"), senate_odds("ME"),
+        senate_odds("TX"), senate_odds("OH"), senate_odds("MI"), senate_odds("ME"),
+        senate_odds("KS"), senate_odds("NE", ind="D"), senate_odds("IA"),
+        senate_odds("SC"), senate_odds("FL"),
     ]),
-    ("GOVERNOR", [gov_odds("TX"), gov_odds("OH"), gov_odds("FL")]),
+    ("GOVERNOR", [ gov_odds("OH"), gov_odds("TX"), gov_odds("FL")]),
 ]
 
 # ---------- ANSI ----------
