@@ -25,7 +25,7 @@ PIN = {
     "GA Senate Margin":  ["KXMIDTERMMOV-GASEND", "KXMIDTERMMOV-GASENR"],
 }
 
-STATES = {"NC": "north carolina", "GA": "georgia", "TX": "texas", "OH": "ohio", "MI": "michigan",
+STATES = {"NC": "north carolina", "GA": "georgia", "TX": "texas", "OH": "ohio", "MI": "michigan", "AK": "alaska",
           "KS": "kansas", "NE": "nebraska", "IA": "iowa", "SC": "south carolina", "FL": "florida", "ME": "maine"}
 ALL_STATES = ["alabama","alaska","arizona","arkansas","california","colorado","connecticut","delaware",
  "florida","georgia","hawaii","idaho","illinois","indiana","iowa","kansas","kentucky","louisiana","maine",
@@ -61,8 +61,8 @@ SECTIONS = [
     ]),
     ("SENATE", [
         senate_margin("NC"), senate_margin("GA"),
-        senate_odds("TX"), senate_odds("OH"), senate_odds("MI"), senate_odds("ME"),
-        senate_odds("KS"), senate_odds("NE", ind="D"), senate_odds("IA"),
+        senate_odds("TX"), senate_odds("OH"), senate_odds("MI"), senate_odds("AK"),
+        senate_odds("ME"), senate_odds("KS"), senate_odds("NE", ind="D"), senate_odds("IA"),
         senate_odds("SC"), senate_odds("FL"),
     ]),
     ("GOVERNOR", [ gov_odds("OH"), gov_odds("TX"), gov_odds("FL")]),
